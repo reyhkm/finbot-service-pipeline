@@ -1,0 +1,69 @@
+name: Production CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  continuous-integration:
+    name: Build, Test & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Project Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Unit Tests
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          pytest test_main.py -v
+
+      - name: Vulnerability Scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Build Docker Image
+        run: |
+          docker build -t finbot-service:${{ github.sha }} .
+
+  continuous-deployment:
+    name: Deployment & Health Verification
+    needs: continuous-integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Deploy Container
+        run: |
+          docker build -t finbot-service:live .
+          docker run -d --name finbot-app -p 8080:8080 -e GEMINI_API_KEY="${{ secrets.GEMINI_API_KEY }}" finbot-service:live
+          sleep 5
+
+      - name: Automated Health Probe & Rollback
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/)
+          if [ "$HTTP_STATUS" -eq 200 ]; then
+              echo "Deployment verified. Status: 200 OK"
+          else
+              echo "Healthcheck failed with status: $HTTP_STATUS"
+              docker stop finbot-app || true
+              docker rm finbot-app || true
+              exit 1
+          fi
